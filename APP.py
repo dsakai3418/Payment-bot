@@ -1,44 +1,44 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+# oauth2client は削除（またはコメントアウト）してOKです
+# from oauth2client.service_account import ServiceAccountCredentials
 import re
 
 # ==========================================
-# 1. 設定・認証エリア (Secretsから読み込み)
+# 1. 設定・認証エリア
 # ==========================================
 
-# ローカル開発時は .streamlit/secrets.toml を参照
-# Streamlit Cloud時は管理画面の Secrets に設定
+# Secretsの読み込み
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    # サービスアカウント情報はJSONの中身をそのままSecretsに登録して辞書として読み込む
-    GCP_SERVICE_ACCOUNT = st.secrets["gcp_service_account"]
+    # ★ここが修正ポイント：st.secretsを明示的に辞書(dict)に変換します
+    GCP_SERVICE_ACCOUNT = dict(st.secrets["gcp_service_account"])
+    SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
 except FileNotFoundError:
     st.error("Secretsファイルが見つかりません。")
     st.stop()
+except KeyError as e:
+    st.error(f"Secretsの設定が不足しています: {e}")
+    st.stop()
 
+# Geminiの設定
 genai.configure(api_key=GEMINI_API_KEY)
 model_name = "gemini-1.5-flash"
 
-# Googleスプレッドシート認証設定
-SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"] # シートIDも隠すのがベスト
+# スプレッドシート設定
+# gspreadの新しい認証方式ではSCOPEは自動設定されますが、念のため指定も可能です
+SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
-# 列の定義 (実際のシートに合わせて調整してください)
-# ※Pythonは0始まり、Gspreadのcol指定は1始まりに注意
-COL_ID = 1          # A列
-COL_NAME = 2        # B列
-COL_EMAIL_EXISTING = 3 # C列
-COL_AMOUNT = 4      # D列
-COL_BOT_URL = 5     # E列
-COL_STATUS = 6      # F列
-COL_EMAIL_NEW = 7   # G列
+# 列の定義
+COL_EMAIL_EXISTING = 3
+COL_STATUS = 6
+COL_EMAIL_NEW = 7
 
 def get_database():
-    # from_json_keyfile_name ではなく from_json_keyfile_dict を使用
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(GCP_SERVICE_ACCOUNT, SCOPE)
-    client_gs = gspread.authorize(creds)
+    # ★ここを大幅に簡略化しました
+    # gspreadの機能を使って直接認証します（エラーが出にくい方法です）
+    client_gs = gspread.service_account_from_dict(GCP_SERVICE_ACCOUNT, scopes=SCOPES)
     sheet = client_gs.open_by_key(SPREADSHEET_KEY).sheet1
     return sheet
 
@@ -50,7 +50,7 @@ st.title("お支払いのご相談窓口")
 
 # URLパラメータからIDを取得
 query_params = st.query_params
-user_id_str = query_params.get("id", None) # ★できれば "key" など推測不可なものに変更推奨
+user_id_str = query_params.get("id", None)
 
 if not user_id_str:
     st.error("アクセス用のIDが指定されていません。")
@@ -64,9 +64,9 @@ try:
     sheet = get_database()
     records = sheet.get_all_records()
     
-    # Camel企業id は数値の場合と文字列の場合があるため str() で統一比較
+    # ユーザー検索
     for i, item in enumerate(records):
-        # get_all_records はヘッダー行を除くため、実際の行番号は i + 2
+        # 行番号はずれないように i + 2 (ヘッダー分+1始まり)
         if str(item.get("Camel企業id")) == user_id_str:
             customer = item
             row_index = i + 2
@@ -80,10 +80,15 @@ if not customer:
     st.error("お客様情報が見つかりませんでした。URLをご確認ください。")
     st.stop()
 
-# 登録済みのメアド
+# 顧客情報の取得
 existing_email_addr = customer.get('送付先メアド', '登録なし')
 company_name = customer.get('会社名', 'お客様')
-unpaid_amount = customer.get('未入金額', 0)
+# 数値型の場合にカンマを入れるなどの整形
+raw_amount = customer.get('未入金額', 0)
+try:
+    unpaid_amount = "{:,}".format(int(str(raw_amount).replace(",", "")))
+except:
+    unpaid_amount = str(raw_amount)
 
 # --- チャットの初期化 ---
 if "messages" not in st.session_state:
@@ -133,9 +138,7 @@ if user_input := st.chat_input("ここに入力してください..."):
     会話の中で入金日が確定したら `[PROMISE_FIXED]` をつけてください。
     """
 
-    # --- Gemini用に履歴データを変換 ---
-    # Gemini APIのエラー回避: historyの先頭はUserである必要があるケースが多い、
-    # またはroleの順番を守る必要があるため、単純変換のみ行う。
+    # Gemini用履歴変換
     gemini_history = []
     for m in st.session_state.messages:
         role = "user" if m["role"] == "user" else "model"
@@ -147,33 +150,26 @@ if user_input := st.chat_input("ここに入力してください..."):
             system_instruction=system_instruction
         )
         
-        # 直前のメッセージを除いたものを履歴とし、直前のメッセージをsend_messageに渡す
-        # ただし、初回（履歴がassistantのみ）の場合、historyに入れると「Userから始まっていない」エラーになることがあるため調整
-        
+        # 履歴と最新メッセージの分離
         history_for_api = gemini_history[:-1]
-        
-        # history_for_api の先頭が model の場合、Geminiがエラーを吐くことがあるため
-        # 必要であればダミーのUserメッセージを入れる等の対策が必要ですが、
-        # 1.5 Flashは比較的寛容なのでこのまま試行します。
         
         chat = model.start_chat(history=history_for_api)
         response = chat.send_message(user_input)
         
         ai_msg = response.text
         
-        # タグの除去と表示
+        # 表示用メッセージ（タグ除去）
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
         with st.chat_message("assistant"):
             st.write(display_msg)
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
-        # --- 裏側の処理 (スプレッドシート更新) ---
+        # --- スプレッドシート更新処理 ---
         if "[EMAIL_RECEIVED:" in ai_msg:
             match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match:
                 confirmed_email = match.group(1).strip()
-                # 既存メアドと比較して異なれば書き込み
                 if confirmed_email != str(existing_email_addr).strip():
                     sheet.update_cell(row_index, COL_EMAIL_NEW, confirmed_email)
                 
