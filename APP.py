@@ -17,11 +17,8 @@ def connect_to_google_sheet():
         gemini_key = st.secrets.get("GEMINI_API_KEY")
         sheet_key = st.secrets.get("SPREADSHEET_KEY")
         
-        if not gemini_key:
-            st.error("エラー: Secretsに 'GEMINI_API_KEY' が設定されていません。")
-            st.stop()
-        if not sheet_key:
-            st.error("エラー: Secretsに 'SPREADSHEET_KEY' が設定されていません。")
+        if not gemini_key or not sheet_key:
+            st.error("エラー: Secretsの設定が不足しています。")
             st.stop()
             
         genai.configure(api_key=gemini_key)
@@ -51,6 +48,33 @@ def connect_to_google_sheet():
     except Exception as e:
         st.error(f"システム接続エラー: {e}")
         st.stop()
+
+# ★ここが新機能：使えるAIモデルを自動で探す関数
+def get_valid_model_name():
+    try:
+        # 使用可能なモデル一覧を取得
+        models = list(genai.list_models())
+        
+        # チャット機能(generateContent)を持ってるモデルだけ抽出
+        chat_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        
+        # 優先順位: 1.5-flash -> 1.5-pro -> gemini-pro -> その他
+        for name in chat_models:
+            if "gemini-1.5-flash" in name: return name
+        for name in chat_models:
+            if "gemini-1.5-pro" in name: return name
+        for name in chat_models:
+            if "gemini-pro" in name: return name
+            
+        # どうしても見つからなければリストの最初を返す
+        if chat_models:
+            return chat_models[0]
+        
+        return "models/gemini-pro" # 万が一の予備
+        
+    except Exception as e:
+        # リスト取得自体に失敗した場合は予備を返す
+        return "gemini-pro"
 
 # データベース接続を実行
 sheet = connect_to_google_sheet()
@@ -119,11 +143,10 @@ if user_input := st.chat_input("ここに入力してください..."):
         st.write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # ★モデル設定：エラー回避のためバージョン指定を変更
-    # もしこれでエラーが出る場合は "gemini-pro" に変えてみてください
-    model_name = "gemini-pro"
+    # ★ここで自動検出したモデル名を使う
+    valid_model_name = get_valid_model_name()
     
-    # ★システムプロンプト：ご希望のフローに合わせて刷新
+    # システムプロンプト（ご要望の「質問対応→担当連携→3営業日」フロー）
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -141,9 +164,9 @@ if user_input := st.chat_input("ここに入力してください..."):
              出力の最後に `[PROMISE_FIXED]` をつけて終了。
 
     パターンB：確認したいことがある / 質問がある / わからない / 担当と話したい場合
-      ユーザー：「確認したいことがある」「請求書がない」「内訳を知りたい」など
+      ユーザー：「何の請求？」「請求書がない」「内訳を知りたい」など
       
-      ステップ1: まず「どのような内容をご確認されたいでしょうか？詳細をご入力ください。」と質問内容を聞き出してください。
+      ステップ1: まず「ご不明な点があるとのこと、失礼いたしました。どのような内容をご確認されたいでしょうか？」と内容を聞き出してください。
       
       ステップ2（ユーザーが詳細を入力した後）:
         「承知いたしました。ご質問内容は担当者に申し送りいたします。
@@ -166,7 +189,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     try:
         model = genai.GenerativeModel(
-            model_name=model_name,
+            model_name=valid_model_name,
             system_instruction=system_instruction
         )
         
@@ -186,14 +209,17 @@ if user_input := st.chat_input("ここに入力してください..."):
             if match:
                 confirmed_email = match.group(1).strip()
                 if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, 7, confirmed_email) # G列
-                sheet.update_cell(row_index, 6, "メール対応中") # F列
+                    sheet.update_cell(row_index, 7, confirmed_email) 
+                sheet.update_cell(row_index, 6, "メール対応中")
 
         elif "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
     except Exception as e:
-        # エラー時のヒントを表示
-        st.error(f"AI応答エラー: {e}")
-        if "404" in str(e):
-            st.warning("ヒント: モデルが見つからないエラーの場合、コード内の `model_name` を 'gemini-pro' に変更して試してみてください。")
+        # 万が一エラーが出た場合、使えるモデル一覧を表示して原因をわかりやすくする
+        st.error(f"AIエラー: {e}")
+        try:
+            available = [m.name for m in genai.list_models()]
+            st.code(f"検出された使用可能モデル一覧:\n{available}")
+        except:
+            st.write("モデル一覧の取得にも失敗しました。APIキーを確認してください。")
