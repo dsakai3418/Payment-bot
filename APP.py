@@ -1,8 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-# oauth2client は削除（またはコメントアウト）してOKです
-# from oauth2client.service_account import ServiceAccountCredentials
 import re
 
 # ==========================================
@@ -12,9 +10,17 @@ import re
 # Secretsの読み込み
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    # ★ここが修正ポイント：st.secretsを明示的に辞書(dict)に変換します
+    
+    # サービスアカウント情報を辞書として取得
     GCP_SERVICE_ACCOUNT = dict(st.secrets["gcp_service_account"])
+    
+    # ★ここが重要：秘密鍵の「\n」という文字を「本当の改行」に変換する処理
+    # これがないと "Cannot convert str..." というエラーが出ることがあります
+    if "private_key" in GCP_SERVICE_ACCOUNT:
+        GCP_SERVICE_ACCOUNT["private_key"] = GCP_SERVICE_ACCOUNT["private_key"].replace("\\n", "\n")
+
     SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
+
 except FileNotFoundError:
     st.error("Secretsファイルが見つかりません。")
     st.stop()
@@ -27,7 +33,6 @@ genai.configure(api_key=GEMINI_API_KEY)
 model_name = "gemini-1.5-flash"
 
 # スプレッドシート設定
-# gspreadの新しい認証方式ではSCOPEは自動設定されますが、念のため指定も可能です
 SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 
 # 列の定義
@@ -36,8 +41,7 @@ COL_STATUS = 6
 COL_EMAIL_NEW = 7
 
 def get_database():
-    # ★ここを大幅に簡略化しました
-    # gspreadの機能を使って直接認証します（エラーが出にくい方法です）
+    # gspreadの標準的な認証方法を使用
     client_gs = gspread.service_account_from_dict(GCP_SERVICE_ACCOUNT, scopes=SCOPES)
     sheet = client_gs.open_by_key(SPREADSHEET_KEY).sheet1
     return sheet
@@ -83,7 +87,8 @@ if not customer:
 # 顧客情報の取得
 existing_email_addr = customer.get('送付先メアド', '登録なし')
 company_name = customer.get('会社名', 'お客様')
-# 数値型の場合にカンマを入れるなどの整形
+
+# 金額のカンマ区切り処理（エラー回避のためtry-except）
 raw_amount = customer.get('未入金額', 0)
 try:
     unpaid_amount = "{:,}".format(int(str(raw_amount).replace(",", "")))
