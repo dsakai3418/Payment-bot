@@ -49,16 +49,12 @@ def connect_to_google_sheet():
         st.error(f"システム接続エラー: {e}")
         st.stop()
 
-# ★ここが新機能：使えるAIモデルを自動で探す関数
+# モデル自動検出関数
 def get_valid_model_name():
     try:
-        # 使用可能なモデル一覧を取得
         models = list(genai.list_models())
-        
-        # チャット機能(generateContent)を持ってるモデルだけ抽出
         chat_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
         
-        # 優先順位: 1.5-flash -> 1.5-pro -> gemini-pro -> その他
         for name in chat_models:
             if "gemini-1.5-flash" in name: return name
         for name in chat_models:
@@ -66,14 +62,9 @@ def get_valid_model_name():
         for name in chat_models:
             if "gemini-pro" in name: return name
             
-        # どうしても見つからなければリストの最初を返す
-        if chat_models:
-            return chat_models[0]
-        
-        return "models/gemini-pro" # 万が一の予備
-        
-    except Exception as e:
-        # リスト取得自体に失敗した場合は予備を返す
+        if chat_models: return chat_models[0]
+        return "models/gemini-pro"
+    except:
         return "gemini-pro"
 
 # データベース接続を実行
@@ -143,10 +134,9 @@ if user_input := st.chat_input("ここに入力してください..."):
         st.write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # ★ここで自動検出したモデル名を使う
     valid_model_name = get_valid_model_name()
     
-    # システムプロンプト（ご要望の「質問対応→担当連携→3営業日」フロー）
+    # ★システムプロンプト：I列転記用タグと、指定の回答フォーマットを追加
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -174,8 +164,17 @@ if user_input := st.chat_input("ここに入力してください..."):
          現在のメールアドレス（{existing_email_addr}）への送付でよろしいでしょうか？」と確認してください。
       
       ステップ3（アドレス確認後）:
-        「承知いたしました。担当へ伝達のうえ、3営業日以内にご連絡いたします。」と答え、
-        出力の最後に `[EMAIL_RECEIVED:{existing_email_addr}]` （または新アドレス）をつけて終了。
+        以下の形式で回答してください。
+        
+        「承知いたしました。
+        [確認したメールアドレス] に
+        「[ヒアリングした質問内容]」
+        を担当へ伝達のうえ、3営業日以内にご連絡いたします。」
+
+        そして、出力の最後に必ず以下の2つのタグをつけてください。
+        1. `[EMAIL_RECEIVED:確認したメールアドレス]`
+        2. `[INQUIRY_CONTENT:ヒアリングした質問内容]`
+        ※ `[INQUIRY_CONTENT:...]` の中身はスプレッドシートに転記されるため、短く要約せず、ユーザーが言った内容を含めてください。
 
     パターンC：肯定のみ（はい、大丈夫です）の場合
       ユーザー：「はい」「わかった」
@@ -197,6 +196,8 @@ if user_input := st.chat_input("ここに入力してください..."):
         response = chat.send_message(user_input)
         
         ai_msg = response.text
+        
+        # 画面表示用にタグを除去（INQUIRY_CONTENTタグも消す）
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
         with st.chat_message("assistant"):
@@ -204,22 +205,28 @@ if user_input := st.chat_input("ここに入力してください..."):
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
         # --- スプレッドシート更新 ---
-        if "[EMAIL_RECEIVED:" in ai_msg:
-            match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
-            if match:
-                confirmed_email = match.group(1).strip()
-                if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, 7, confirmed_email) 
-                sheet.update_cell(row_index, 6, "メール対応中")
+        
+        # 1. 質問内容（I列転記）
+        if "[INQUIRY_CONTENT:" in ai_msg:
+            # 改行が含まれる場合に対応するため DOTALL フラグを使用
+            match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
+            if match_content:
+                inquiry_text = match_content.group(1).strip()
+                # I列 = 9列目
+                sheet.update_cell(row_index, 9, inquiry_text)
 
+        # 2. メールアドレス（G列転記 & ステータス更新）
+        if "[EMAIL_RECEIVED:" in ai_msg:
+            match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
+            if match_email:
+                confirmed_email = match_email.group(1).strip()
+                if confirmed_email != str(existing_email_addr).strip():
+                    sheet.update_cell(row_index, 7, confirmed_email) # G列
+                sheet.update_cell(row_index, 6, "メール対応中") # F列
+
+        # 3. 入金約束（ステータス更新）
         elif "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
     except Exception as e:
-        # 万が一エラーが出た場合、使えるモデル一覧を表示して原因をわかりやすくする
         st.error(f"AIエラー: {e}")
-        try:
-            available = [m.name for m in genai.list_models()]
-            st.code(f"検出された使用可能モデル一覧:\n{available}")
-        except:
-            st.write("モデル一覧の取得にも失敗しました。APIキーを確認してください。")
