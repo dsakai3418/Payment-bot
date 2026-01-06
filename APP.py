@@ -1,7 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials # ★ここが変更点
+from oauth2client.service_account import ServiceAccountCredentials
 import json
 import re
 
@@ -13,21 +13,21 @@ st.title("お支払いのご相談窓口")
 
 def connect_to_google_sheet():
     try:
-        # --- 1. APIキーの読み込み ---
+        # --- APIキーとシートIDの読み込み ---
         gemini_key = st.secrets.get("GEMINI_API_KEY")
         sheet_key = st.secrets.get("SPREADSHEET_KEY")
         
         if not gemini_key:
-            st.error("エラー: Secretsに 'GEMINI_API_KEY' がありません。")
+            st.error("エラー: Secretsに 'GEMINI_API_KEY' が設定されていません。")
             st.stop()
         if not sheet_key:
-            st.error("エラー: Secretsに 'SPREADSHEET_KEY' がありません。")
+            st.error("エラー: Secretsに 'SPREADSHEET_KEY' が設定されていません。")
             st.stop()
             
         genai.configure(api_key=gemini_key)
 
-        # --- 2. JSONキーの読み込みと辞書化 ---
-        # Secretsに保存した長い文字列(GCP_JSON_KEY)を読み込みます
+        # --- JSONキーの読み込み ---
+        # Secretsの GPC_JSON_KEY (長い文字列) を読み込みます
         json_str = st.secrets.get("GCP_JSON_KEY")
         
         if not json_str:
@@ -41,15 +41,13 @@ def connect_to_google_sheet():
             st.error(f"SecretsのJSON形式が正しくありません。\n詳細: {e}")
             st.stop()
 
-        # --- 3. 秘密鍵の改行コード修正 ---
-        # TOMLやコピペの影響で \n が文字になっている場合があるので修正
+        # --- 秘密鍵の改行コード修正 ---
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-        # --- 4. 認証と接続 (昔ながらの安定版) ---
+        # --- 認証と接続 (oauth2client使用) ---
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         
-        # oauth2clientを使って辞書データから直接認証を作る
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
@@ -58,7 +56,6 @@ def connect_to_google_sheet():
         return sheet
 
     except Exception as e:
-        # ここでエラーが出たら画面に表示
         st.error(f"システム接続エラー: {e}")
         st.stop()
 
@@ -87,7 +84,7 @@ try:
         # IDを文字列にして比較
         if str(item.get("Camel企業id")) == str(user_id_str):
             customer = item
-            row_index = i + 2
+            row_index = i + 2 # ヘッダー行(1) + index(0始まり) の補正
             break
 except Exception as e:
     st.error(f"データ取得中にエラーが発生しました: {e}")
@@ -111,13 +108,17 @@ except:
 
 # --- チャットのUI表示 ---
 if "messages" not in st.session_state:
+    # ★ご指定の自然な文章に変更済み
     welcome_msg = (
-        f"{company_name} 様、いつもご利用ありがとうございます。\n"
-        f"現在、未入金額 {unpaid_amount}円 について確認のご連絡です。\n"
-        "今後のご連絡は「メール」でのやり取りをご希望でしょうか？"
+        f"{company_name} 様\n\n"
+        "いつもご利用ありがとうございます。\n"
+        "Camelのご請求に関する、未入金金額の確認窓口でございます。\n\n"
+        f"現在、ご請求金額のうち、{unpaid_amount}円のご入金が確認できかねております。\n"
+        "つきましては、ご入金予定日をお伺いしてもよろしいでしょうか？"
     )
     st.session_state.messages = [{"role": "assistant", "content": welcome_msg}]
 
+# チャット履歴の描画
 for msg in st.session_state.messages:
     role_display = "user" if msg["role"] == "user" else "assistant"
     with st.chat_message(role_display):
@@ -125,21 +126,35 @@ for msg in st.session_state.messages:
 
 # --- ユーザー入力とAI応答 ---
 if user_input := st.chat_input("ここに入力してください..."):
+    # ユーザーの入力を表示
     with st.chat_message("user"):
         st.write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
     # Geminiの設定
     model_name = "gemini-1.5-flash"
+    
+    # ★システムプロンプト：入金確認フローに合わせて調整済み
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
     
+    【基本ルール】
     親切かつ丁寧なビジネス口調で対応してください。
-    メール連絡を希望された場合は「{existing_email_addr}」でよいか確認し、
-    OKなら `[EMAIL_RECEIVED:{existing_email_addr}]` を、
-    変更なら新しいアドレスを聞いて `[EMAIL_RECEIVED:新アドレス]` を出力してください。
-    入金日が決まったら `[PROMISE_FIXED]` を出力してください。
+    あなたは既に最初の挨拶で「入金予定日を教えてほしい」と質問しています。
+    
+    【対応フロー】
+    1. ユーザーが「具体的な日付」や「いついつ」と答えた場合:
+       「承知いたしました。〇月〇日ですね、ありがとうございます。」と確認し、
+       社内共有のため、出力の最後に必ず `[PROMISE_FIXED]` をつけてください。
+    
+    2. ユーザーが「はい」「大丈夫です」などの肯定のみ答えた場合:
+       「ありがとうございます。いつ頃のご予定になりますでしょうか？」と日付を聞き返してください。
+
+    3. ユーザーが「わからない」「メールで連絡したい」「担当者と話したい」と言った場合:
+       「それでは、メールにて詳細を確認させていただいてもよろしいでしょうか？」と提案してください。
+       相手が合意したら `[EMAIL_RECEIVED:{existing_email_addr}]` を出力してください。
+       （もしアドレス変更の申し出があれば `[EMAIL_RECEIVED:新アドレス]` を出力）
     """
 
     # Gemini用に履歴を変換
@@ -159,21 +174,28 @@ if user_input := st.chat_input("ここに入力してください..."):
         response = chat.send_message(user_input)
         
         ai_msg = response.text
+        
+        # 画面表示用にタグを除去
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
         with st.chat_message("assistant"):
             st.write(display_msg)
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
-        # --- スプレッドシート更新 ---
+        # --- スプレッドシート更新処理 ---
+        # [EMAIL_RECEIVED:xxx] が含まれていたらメールアドレス更新＆ステータス更新
         if "[EMAIL_RECEIVED:" in ai_msg:
             match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match:
                 confirmed_email = match.group(1).strip()
+                # 既存アドレスと違う場合のみG列(7列目)を更新
                 if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, 7, confirmed_email) # G列
-                sheet.update_cell(row_index, 6, "メール対応中") # F列
+                    sheet.update_cell(row_index, 7, confirmed_email) 
+                
+                # F列(6列目)をステータス更新
+                sheet.update_cell(row_index, 6, "メール対応中")
 
+        # [PROMISE_FIXED] が含まれていたらステータスを入金約束済に
         elif "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
