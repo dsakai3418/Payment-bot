@@ -201,4 +201,84 @@ if user_input := st.chat_input("ここに入力してください..."):
 
       ステップ2（ユーザーが詳細を入力した後）: メアド確認をしてください。
       【出力テンプレート】
-      「承知いたし
+      「承知いたしました。
+      ご回答内容は担当者に申し送りいたします。
+
+      回答は担当よりメールにてご連絡させていただきますが、
+      現在のメールアドレス（{existing_email_addr}）への送付でよろしいでしょうか？」
+      
+      ステップ3（アドレス確認後）: 最終確認を出してください。
+      【出力テンプレート】
+      「承知いたしました。
+
+      ＝＝＝＝＝＝＝＝＝＝
+
+      メールアドレス：[確認したメールアドレス]
+
+      ご質問内容：[ヒアリングした内容]
+
+      ＝＝＝＝＝＝＝＝＝＝
+
+      上記内容を担当へ伝達のうえ、3営業日以内にご連絡いたします。
+
+      内容に変更があれば再度ご入力ください。
+      なければ、そのまま画面を閉じて終了してください。」
+
+      （出力の最後に隠しタグ `[EMAIL_RECEIVED:確認したメールアドレス]` `[INQUIRY_CONTENT:ヒアリングした内容]` をつける）
+
+    パターンC：肯定のみ（はい、大丈夫です）の場合
+      ボット：「ありがとうございます。いつ頃のご入金予定になりますでしょうか？」
+    """
+
+    gemini_history = []
+    for m in st.session_state.messages:
+        role = "user" if m["role"] == "user" else "model"
+        gemini_history.append({"role": role, "parts": [m["content"]]})
+
+    try:
+        model = genai.GenerativeModel(
+            model_name=valid_model_name,
+            system_instruction=system_instruction
+        )
+        
+        chat = model.start_chat(history=gemini_history[:-1])
+        response = chat.send_message(user_input)
+        
+        ai_msg = response.text
+        
+        # 画面表示用にタグを除去
+        display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
+        
+        with st.chat_message("assistant"):
+            st.write(display_msg)
+        st.session_state.messages.append({"role": "assistant", "content": display_msg})
+
+        # --- スプレッドシート更新 ---
+        
+        # 1. 質問内容（I列転記）
+        if "[INQUIRY_CONTENT:" in ai_msg:
+            match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
+            if match_content:
+                inquiry_text = match_content.group(1).strip()
+                sheet.update_cell(row_index, 9, inquiry_text)
+
+        # 2. メールアドレス（G列転記 & ステータス更新）
+        if "[EMAIL_RECEIVED:" in ai_msg:
+            match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
+            if match_email:
+                confirmed_email = match_email.group(1).strip()
+                sheet.update_cell(row_index, 7, confirmed_email)
+                sheet.update_cell(row_index, 6, "メール対応中")
+
+        # 3. 入金約束（日付をH列転記 & ステータス更新）
+        if "[PAYMENT_DATE:" in ai_msg:
+            match_date = re.search(r"\[PAYMENT_DATE:(.*?)\]", ai_msg)
+            if match_date:
+                payment_date = match_date.group(1).strip()
+                sheet.update_cell(row_index, 8, payment_date)
+
+        if "[PROMISE_FIXED]" in ai_msg:
+            sheet.update_cell(row_index, 6, "入金約束済")
+
+    except Exception as e:
+        st.error(f"AIエラー: {e}")
