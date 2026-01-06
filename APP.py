@@ -1,6 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
+from google.oauth2.service_account import Credentials # ★ここが新しいライブラリ
 import re
 
 # ==========================================
@@ -10,16 +11,19 @@ import re
 # Secretsの読み込み
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    
-    # サービスアカウント情報を辞書として取得
-    GCP_SERVICE_ACCOUNT = dict(st.secrets["gcp_service_account"])
-    
-    # ★ここが重要：秘密鍵の「\n」という文字を「本当の改行」に変換する処理
-    # これがないと "Cannot convert str..." というエラーが出ることがあります
-    if "private_key" in GCP_SERVICE_ACCOUNT:
-        GCP_SERVICE_ACCOUNT["private_key"] = GCP_SERVICE_ACCOUNT["private_key"].replace("\\n", "\n")
-
     SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
+
+    # ★ここが修正のキモです
+    # Secretsから辞書データを取得し、新しい辞書として再定義（コピー）します
+    # これで「変なデータ型」になるのを防ぎます
+    raw_service_account = st.secrets["gcp_service_account"]
+    service_account_info = {key: value for key, value in raw_service_account.items()}
+
+    # 秘密鍵の改行コード修正（念のためより強力に修正）
+    if "private_key" in service_account_info:
+        private_key = service_account_info["private_key"]
+        # すでに改行されている場合はそのままでOK、文字として\nが入っている場合は置換
+        service_account_info["private_key"] = private_key.replace("\\n", "\n")
 
 except FileNotFoundError:
     st.error("Secretsファイルが見つかりません。")
@@ -27,22 +31,27 @@ except FileNotFoundError:
 except KeyError as e:
     st.error(f"Secretsの設定が不足しています: {e}")
     st.stop()
+except Exception as e:
+    st.error(f"認証情報の読み込み中にエラーが発生しました: {e}")
+    st.stop()
 
 # Geminiの設定
 genai.configure(api_key=GEMINI_API_KEY)
 model_name = "gemini-1.5-flash"
 
 # スプレッドシート設定
-SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-
-# 列の定義
-COL_EMAIL_EXISTING = 3
-COL_STATUS = 6
-COL_EMAIL_NEW = 7
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
 
 def get_database():
-    # gspreadの標準的な認証方法を使用
-    client_gs = gspread.service_account_from_dict(GCP_SERVICE_ACCOUNT, scopes=SCOPES)
+    # ★ここを頑丈な方式に変更
+    # 直接Credentialsオブジェクトを作ってからgspreadに渡します
+    creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+    client_gs = gspread.authorize(creds)
+    
+    # シートを開く
     sheet = client_gs.open_by_key(SPREADSHEET_KEY).sheet1
     return sheet
 
@@ -77,7 +86,8 @@ try:
             break
         
 except Exception as e:
-    st.error(f"データベース接続エラー: {e}")
+    # ここでエラー内容を詳しく表示するように変更
+    st.error(f"データベース接続エラー詳細: {e}")
     st.stop()
 
 if not customer:
@@ -88,7 +98,7 @@ if not customer:
 existing_email_addr = customer.get('送付先メアド', '登録なし')
 company_name = customer.get('会社名', 'お客様')
 
-# 金額のカンマ区切り処理（エラー回避のためtry-except）
+# 金額のカンマ区切り処理
 raw_amount = customer.get('未入金額', 0)
 try:
     unpaid_amount = "{:,}".format(int(str(raw_amount).replace(",", "")))
@@ -171,17 +181,21 @@ if user_input := st.chat_input("ここに入力してください..."):
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
         # --- スプレッドシート更新処理 ---
+        # 列番号定義 (A=1, B=2...)
+        # COL_STATUS = 6 (F列)
+        # COL_EMAIL_NEW = 7 (G列)
+        
         if "[EMAIL_RECEIVED:" in ai_msg:
             match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match:
                 confirmed_email = match.group(1).strip()
                 if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, COL_EMAIL_NEW, confirmed_email)
+                    sheet.update_cell(row_index, 7, confirmed_email)
                 
-                sheet.update_cell(row_index, COL_STATUS, "メール対応中")
+                sheet.update_cell(row_index, 6, "メール対応中")
 
         elif "[PROMISE_FIXED]" in ai_msg:
-            sheet.update_cell(row_index, COL_STATUS, "入金約束済")
+            sheet.update_cell(row_index, 6, "入金約束済")
 
     except Exception as e:
         st.error(f"AI応答エラー: {e}")
