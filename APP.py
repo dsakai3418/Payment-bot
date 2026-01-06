@@ -10,7 +10,6 @@ import datetime
 # 1. 設定・認証エリア
 # ==========================================
 
-# ★修正点：タイトルを変更しました
 st.title("お支払いの一次ご相談窓口")
 
 def connect_to_google_sheet():
@@ -150,7 +149,7 @@ if user_input := st.chat_input("ここに入力してください..."):
     end_of_month = next_month - datetime.timedelta(days=1)
     end_of_month_str = end_of_month.strftime("%Y年%m月%d日")
 
-    # ★システムプロンプト：パターンBで勝手に進まないよう指示を強化
+    # ★システムプロンプト：パターンBの文言修正
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -226,6 +225,7 @@ if user_input := st.chat_input("ここに入力してください..."):
       ＝＝＝＝＝＝＝＝＝＝
 
       上記内容を担当へ伝達のうえ、3営業日以内にご連絡いたします。
+      なお、お電話での連絡希望など、ご希望の連絡方法には添いかねる場合がございます。あらかじめご了承ください。
 
       内容に変更があれば再度ご入力ください。
       なければ、そのまま画面を閉じて終了してください。」
@@ -261,6 +261,9 @@ if user_input := st.chat_input("ここに入力してください..."):
 
         # --- スプレッドシート更新 ---
         
+        # 本日の日付
+        action_date = datetime.date.today().strftime("%Y/%m/%d")
+
         # 1. 質問内容（I列転記）
         if "[INQUIRY_CONTENT:" in ai_msg:
             match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
@@ -268,15 +271,16 @@ if user_input := st.chat_input("ここに入力してください..."):
                 inquiry_text = match_content.group(1).strip()
                 sheet.update_cell(row_index, 9, inquiry_text)
 
-        # 2. メールアドレス（G列転記 & ステータス更新）
+        # 2. メールアドレス（G列転記 & ステータス更新 & 回答日更新）
         if "[EMAIL_RECEIVED:" in ai_msg:
             match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match_email:
                 confirmed_email = match_email.group(1).strip()
                 sheet.update_cell(row_index, 7, confirmed_email)
                 sheet.update_cell(row_index, 6, "メール対応中")
+                sheet.update_cell(row_index, 10, action_date) # J列(10列目)に回答日
 
-        # 3. 入金約束（日付をH列転記 & ステータス更新）
+        # 3. 入金約束（日付をH列転記 & ステータス更新 & 回答日更新）
         if "[PAYMENT_DATE:" in ai_msg:
             match_date = re.search(r"\[PAYMENT_DATE:(.*?)\]", ai_msg)
             if match_date:
@@ -285,6 +289,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
         if "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
+            sheet.update_cell(row_index, 10, action_date) # J列(10列目)に回答日
 
     except Exception as e:
         st.error(f"AIエラー: {e}")
