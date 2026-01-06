@@ -121,7 +121,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     # ★モデル設定：エラー回避のためバージョン指定を変更
     # もしこれでエラーが出る場合は "gemini-pro" に変えてみてください
-    model_name = "gemini-1.5-flash-latest"
+    model_name = "gemini-pro"
     
     # ★システムプロンプト：ご希望のフローに合わせて刷新
     system_instruction = f"""
