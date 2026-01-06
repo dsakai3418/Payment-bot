@@ -137,16 +137,28 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     valid_model_name = get_valid_model_name()
     
-    today_str = datetime.date.today().strftime("%Y年%m月%d日")
-    weekday_str = ["月","火","水","木","金","土","日"][datetime.date.today().weekday()]
+    # --- 日付情報の計算 ---
+    today = datetime.date.today()
+    today_str = today.strftime("%Y年%m月%d日")
+    weekday_str = ["月","火","水","木","金","土","日"][today.weekday()]
+    
+    # 当月末日の計算
+    # 翌月の1日を求めてから1日引く
+    if today.month == 12:
+        next_month = today.replace(year=today.year + 1, month=1, day=1)
+    else:
+        next_month = today.replace(month=today.month + 1, day=1)
+    end_of_month = next_month - datetime.timedelta(days=1)
+    end_of_month_str = end_of_month.strftime("%Y年%m月%d日")
 
-    # ★システムプロンプト：H列転記用のタグ [PAYMENT_DATE:...] を出力するように指示追加
+    # ★システムプロンプト：入金期限（当月末）のルールを追加
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
     
     【日付情報の基準】
     本日は {today_str} ({weekday_str}曜日) です。
+    当月の末日は {end_of_month_str} です。
     「来週の月曜」「今週末」などの日付表現は、この基準日をもとに具体的な日付（YYYY年M月D日）に変換してください。
 
     【重要：表示フォーマットについて】
@@ -158,6 +170,12 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     パターンA：入金予定日を回答してくれた場合
       ユーザー：「来週の月曜」「10/25です」など
+      
+      ★重要チェック: 回答された日付が「{end_of_month_str}」より後（来月以降など）の場合は、
+      「申し訳ございません。当システムでは {end_of_month_str} までのお約束のみ承っております。
+      今月中でのお支払いは可能でしょうか？」と断ってください。（この場合タグは出力しないでください）
+      
+      日付が {end_of_month_str} 以前であれば、以下のテンプレートで回答してください。
       
       【出力テンプレート】
       「承知いたしました。
@@ -251,17 +269,16 @@ if user_input := st.chat_input("ここに入力してください..."):
             match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match_email:
                 confirmed_email = match_email.group(1).strip()
-                sheet.update_cell(row_index, 7, confirmed_email) # G列
-                sheet.update_cell(row_index, 6, "メール対応中") # F列
+                sheet.update_cell(row_index, 7, confirmed_email)
+                sheet.update_cell(row_index, 6, "メール対応中")
 
         # 3. 入金約束（日付をH列転記 & ステータス更新）
         if "[PAYMENT_DATE:" in ai_msg:
             match_date = re.search(r"\[PAYMENT_DATE:(.*?)\]", ai_msg)
             if match_date:
                 payment_date = match_date.group(1).strip()
-                sheet.update_cell(row_index, 8, payment_date) # H列に日付書き込み
+                sheet.update_cell(row_index, 8, payment_date)
 
-        # 日付タグがなくても PROMISE_FIXED があればステータス更新
         if "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
