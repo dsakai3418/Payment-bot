@@ -1,38 +1,34 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-from google.oauth2.service_account import Credentials
 import json
+import tempfile
+import os
 import re
 
 # ==========================================
 # 1. 設定・認証エリア
 # ==========================================
 
-# Secretsの読み込みと整形
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
     
-    # ★ここが修正の最重要ポイント
-    # Secretsが「辞書」として取れるか、「文字」として取れるかを確認して処理を分岐
+    # Secretsの中身を辞書として確保
     raw_key = st.secrets["gcp_service_account"]
     
+    # 文字列なら辞書に変換、すでにならそのまま
     if isinstance(raw_key, str):
-        # 文字列ならJSONとして変換（パース）する
         try:
             service_account_info = json.loads(raw_key)
         except json.JSONDecodeError:
-            # JSON変換に失敗したら、TOMLの記述ミスを疑う（そのまま辞書化を試みる）
             service_account_info = dict(raw_key)
     else:
-        # すでにオブジェクトなら辞書化してコピー
         service_account_info = dict(raw_key)
 
-    # 秘密鍵の「\n」問題への対処（念には念を入れて修正）
+    # 秘密鍵の改行コード修正
     if "private_key" in service_account_info:
         pk = service_account_info["private_key"]
-        # 文字列の "\n" を 本物の改行コードに置換
         service_account_info["private_key"] = pk.replace("\\n", "\n")
 
 except Exception as e:
@@ -50,18 +46,32 @@ SCOPES = [
 ]
 
 def get_database():
+    # ★ここが解決策：一時ファイルを作成して「ファイル」として読み込ませる
+    # これにより "Cannot convert str..." エラーを物理的に回避します
+    temp_filename = None
     try:
-        # gspreadの関数を使わず、google-authで直接認証情報を作成する（一番確実な方法）
-        creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
-        client_gs = gspread.authorize(creds)
+        # 1. 一時的なJSONファイルを作成
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(service_account_info, f)
+            temp_filename = f.name
         
-        # シートを開く
+        # 2. そのファイルを指定して認証（これが最も確実な方法）
+        client_gs = gspread.service_account(filename=temp_filename, scopes=SCOPES)
+        
+        # 3. シートを開く
         sheet = client_gs.open_by_key(SPREADSHEET_KEY).sheet1
         return sheet
+
     except Exception as e:
-        # エラー発生時に詳細を表示
-        st.error(f"スプレッドシート接続時にエラーが発生しました。\n詳細: {e}")
+        st.error(f"スプレッドシート接続エラー詳細: {e}")
         raise e
+    finally:
+        # 4. 後片付け（一時ファイルを削除）
+        if temp_filename and os.path.exists(temp_filename):
+            try:
+                os.remove(temp_filename)
+            except:
+                pass
 
 # ==========================================
 # 2. アプリ本体
@@ -87,14 +97,12 @@ try:
     
     # ユーザー検索
     for i, item in enumerate(records):
-        # Camel企業idを文字列化して比較
         if str(item.get("Camel企業id")) == str(user_id_str):
             customer = item
             row_index = i + 2
             break
         
 except Exception as e:
-    # 接続エラーの場合はここでストップ
     st.stop()
 
 if not customer:
@@ -108,7 +116,6 @@ company_name = customer.get('会社名', 'お客様')
 # 未入金額の整形
 raw_amount = customer.get('未入金額', 0)
 try:
-    # "11,000" のような文字でも 11000 のような数値でも対応
     amount_val = int(str(raw_amount).replace(",", ""))
     unpaid_amount = "{:,}".format(amount_val)
 except:
@@ -190,19 +197,13 @@ if user_input := st.chat_input("ここに入力してください..."):
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
         # --- スプレッドシート更新処理 ---
-        # 更新先の列番号 (A=1, B=2...)
-        # Status列: 6 (F列)
-        # NewEmail列: 7 (G列)
-        
         if "[EMAIL_RECEIVED:" in ai_msg:
             match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match:
                 confirmed_email = match.group(1).strip()
-                # 現在のメアドと違う場合のみG列に書き込み
                 if confirmed_email != str(existing_email_addr).strip():
                     sheet.update_cell(row_index, 7, confirmed_email)
                 
-                # ステータス更新
                 sheet.update_cell(row_index, 6, "メール対応中")
 
         elif "[PROMISE_FIXED]" in ai_msg:
