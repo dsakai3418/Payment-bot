@@ -1,9 +1,7 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-import json
-import tempfile
-import os
+from google.oauth2.service_account import Credentials # ここで直接認証を作る
 import re
 
 # ==========================================
@@ -14,25 +12,23 @@ try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
     
-    # Secretsの中身を辞書として確保
-    raw_key = st.secrets["gcp_service_account"]
+    # Secretsからデータを取得し、完全に新しい「ただの辞書」としてコピーを作成
+    # これによりStreamlit特有のデータ型によるエラーを排除
+    raw_secret = st.secrets["gcp_service_account"]
     
-    # 文字列なら辞書に変換、すでにならそのまま
-    if isinstance(raw_key, str):
-        try:
-            service_account_info = json.loads(raw_key)
-        except json.JSONDecodeError:
-            service_account_info = dict(raw_key)
-    else:
-        service_account_info = dict(raw_key)
+    # データを1つずつ取り出して新しい辞書に入れる（念には念を入れたコピー）
+    service_account_info = {}
+    for key, value in raw_secret.items():
+        service_account_info[key] = value
 
     # 秘密鍵の改行コード修正
+    # JSONの "\n" という文字を、本物の改行コードに置換
     if "private_key" in service_account_info:
-        pk = service_account_info["private_key"]
-        service_account_info["private_key"] = pk.replace("\\n", "\n")
+        private_key = service_account_info["private_key"]
+        service_account_info["private_key"] = private_key.replace("\\n", "\n")
 
 except Exception as e:
-    st.error(f"認証情報の読み込みエラー: {e}")
+    st.error(f"Secretsの読み込み段階でエラーが発生しました: {e}")
     st.stop()
 
 # Geminiの設定
@@ -46,32 +42,23 @@ SCOPES = [
 ]
 
 def get_database():
-    # ★ここが解決策：一時ファイルを作成して「ファイル」として読み込ませる
-    # これにより "Cannot convert str..." エラーを物理的に回避します
-    temp_filename = None
     try:
-        # 1. 一時的なJSONファイルを作成
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(service_account_info, f)
-            temp_filename = f.name
+        # ★ここが最終解決策
+        # ファイルを読み込むのではなく、辞書データから直接「認証オブジェクト(creds)」を作ります
+        # これにより "Cannot convert str..." エラーが出る場所（json.load）を通りません
+        creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
         
-        # 2. そのファイルを指定して認証（これが最も確実な方法）
-        client_gs = gspread.service_account(filename=temp_filename, scopes=SCOPES)
+        # 作成した認証オブジェクトをgspreadに渡す
+        client_gs = gspread.authorize(creds)
         
-        # 3. シートを開く
+        # シートを開く
         sheet = client_gs.open_by_key(SPREADSHEET_KEY).sheet1
         return sheet
 
     except Exception as e:
-        st.error(f"スプレッドシート接続エラー詳細: {e}")
+        # 万が一ここでエラーが出た場合、原因を特定しやすくする
+        st.error(f"認証作成またはシート接続エラー: {e}")
         raise e
-    finally:
-        # 4. 後片付け（一時ファイルを削除）
-        if temp_filename and os.path.exists(temp_filename):
-            try:
-                os.remove(temp_filename)
-            except:
-                pass
 
 # ==========================================
 # 2. アプリ本体
@@ -97,12 +84,14 @@ try:
     
     # ユーザー検索
     for i, item in enumerate(records):
+        # IDを文字列として比較
         if str(item.get("Camel企業id")) == str(user_id_str):
             customer = item
             row_index = i + 2
             break
         
 except Exception as e:
+    # 詳細エラーは get_database 内で表示済みのため停止のみ
     st.stop()
 
 if not customer:
@@ -116,6 +105,7 @@ company_name = customer.get('会社名', 'お客様')
 # 未入金額の整形
 raw_amount = customer.get('未入金額', 0)
 try:
+    # どんな形式（文字列カンマあり、数値など）でも数値にしてから整形
     amount_val = int(str(raw_amount).replace(",", ""))
     unpaid_amount = "{:,}".format(amount_val)
 except:
