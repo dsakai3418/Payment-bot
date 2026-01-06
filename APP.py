@@ -149,7 +149,7 @@ if user_input := st.chat_input("ここに入力してください..."):
     end_of_month = next_month - datetime.timedelta(days=1)
     end_of_month_str = end_of_month.strftime("%Y年%m月%d日")
 
-    # ★システムプロンプト：パターンBの文言修正
+    # ★システムプロンプト
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -163,9 +163,6 @@ if user_input := st.chat_input("ここに入力してください..."):
     Web画面で正しく改行表示させるため、改行する箇所には必ず「空白行（2回改行）」を入れてください。
     また、指定されたセリフ以外（不要な「。」や挨拶）を勝手に追加しないでください。
     
-    【重要：ステップの厳守】
-    一度の回答で複数のステップをまとめて進めないでください。必ず1つのステップだけを実行して、ユーザーの返信を待ってください。
-
     【対応フロー】
     ユーザーの回答に応じて、以下の3つのパターンのいずれかで対応してください。
 
@@ -255,6 +252,20 @@ if user_input := st.chat_input("ここに入力してください..."):
         # 画面表示用にタグを除去
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
+        # ★追加：表示崩れを防ぐため、Python側で強制的に改行を挿入して整形する
+        # 「＝＝＝」の前後に改行を入れる
+        display_msg = re.sub(r"(＝＝＝＝＝＝＝＝＝＝)", r"\n\n\1\n\n", display_msg)
+        # 「メールアドレス：」等の前に改行を入れる
+        display_msg = re.sub(r"(メールアドレス：)", r"\n\n\1", display_msg)
+        display_msg = re.sub(r"(ご質問内容：)", r"\n\n\1", display_msg)
+        display_msg = re.sub(r"(ご入金予定日：)", r"\n\n\1", display_msg)
+        # 「上記内容を」や「なお、」の前に改行を入れる
+        display_msg = re.sub(r"(上記内容を担当へ)", r"\n\n\1", display_msg)
+        display_msg = re.sub(r"(なお、お電話)", r"\n\n\1", display_msg)
+        display_msg = re.sub(r"(内容に変更があれば)", r"\n\n\1", display_msg)
+        # 連続しすぎた改行(3つ以上)を2つに整える
+        display_msg = re.sub(r'\n{3,}', '\n\n', display_msg).strip()
+
         with st.chat_message("assistant"):
             st.write(display_msg)
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
@@ -278,7 +289,7 @@ if user_input := st.chat_input("ここに入力してください..."):
                 confirmed_email = match_email.group(1).strip()
                 sheet.update_cell(row_index, 7, confirmed_email)
                 sheet.update_cell(row_index, 6, "メール対応中")
-                sheet.update_cell(row_index, 10, action_date) # J列(10列目)に回答日
+                sheet.update_cell(row_index, 10, action_date)
 
         # 3. 入金約束（日付をH列転記 & ステータス更新 & 回答日更新）
         if "[PAYMENT_DATE:" in ai_msg:
@@ -289,7 +300,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
         if "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
-            sheet.update_cell(row_index, 10, action_date) # J列(10列目)に回答日
+            sheet.update_cell(row_index, 10, action_date)
 
     except Exception as e:
         st.error(f"AIエラー: {e}")
