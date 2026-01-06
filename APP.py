@@ -136,7 +136,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     valid_model_name = get_valid_model_name()
     
-    # ★システムプロンプト：改行指示と、完了時のフォーマット指定を強化
+    # ★システムプロンプト：表示崩れ防止のため「空白行」を強調して指示
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -165,13 +165,16 @@ if user_input := st.chat_input("ここに入力してください..."):
          現在のメールアドレス（{existing_email_addr}）への送付でよろしいでしょうか？」と確認してください。
       
       ステップ3（アドレス確認後）:
-        以下の形式で回答してください（枠線を使って見やすくしてください）。
+        以下の形式で回答してください（重要：枠線の中は、必ず項目ごとに改行を2回入れて空白行を作ってください）。
         
         「承知いたしました。
 
         ＝＝＝＝＝＝＝＝＝＝
+
         メールアドレス：[確認したメールアドレス]
+
         ご質問内容：[ヒアリングした質問内容]
+
         ＝＝＝＝＝＝＝＝＝＝
 
         上記内容を担当へ伝達のうえ、3営業日以内にご連絡いたします。
@@ -203,7 +206,7 @@ if user_input := st.chat_input("ここに入力してください..."):
         
         ai_msg = response.text
         
-        # 画面表示用にタグを除去（INQUIRY_CONTENTタグも消す）
+        # 画面表示用にタグを除去
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
         with st.chat_message("assistant"):
@@ -214,11 +217,11 @@ if user_input := st.chat_input("ここに入力してください..."):
         
         # 1. 質問内容（I列転記）
         if "[INQUIRY_CONTENT:" in ai_msg:
-            # 改行が含まれる場合に対応するため DOTALL フラグを使用
             match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
             if match_content:
                 inquiry_text = match_content.group(1).strip()
-                # I列 = 9列目
+                # I列(9列目)に書き込み
+                # ★修正点：すでに記載があっても上書きする仕様です
                 sheet.update_cell(row_index, 9, inquiry_text)
 
         # 2. メールアドレス（G列転記 & ステータス更新）
@@ -226,9 +229,12 @@ if user_input := st.chat_input("ここに入力してください..."):
             match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match_email:
                 confirmed_email = match_email.group(1).strip()
-                if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, 7, confirmed_email) # G列
-                sheet.update_cell(row_index, 6, "メール対応中") # F列
+                # G列(7列目)に書き込み
+                # ★修正点：既存と一致していても必ず上書き保存するように条件分岐を削除しました
+                sheet.update_cell(row_index, 7, confirmed_email)
+                
+                # F列(6列目)をステータス更新
+                sheet.update_cell(row_index, 6, "メール対応中")
 
         # 3. 入金約束（ステータス更新）
         elif "[PROMISE_FIXED]" in ai_msg:
