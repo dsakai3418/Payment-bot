@@ -149,7 +149,7 @@ if user_input := st.chat_input("ここに入力してください..."):
     end_of_month = next_month - datetime.timedelta(days=1)
     end_of_month_str = end_of_month.strftime("%Y年%m月%d日")
 
-    # ★システムプロンプト
+    # ★システムプロンプト：追記対応のロジックを追加
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
@@ -163,6 +163,9 @@ if user_input := st.chat_input("ここに入力してください..."):
     Web画面で正しく改行表示させるため、改行する箇所には必ず「空白行（2回改行）」を入れてください。
     また、指定されたセリフ以外（不要な「。」や挨拶）を勝手に追加しないでください。
     
+    【重要：ステップの厳守】
+    一度の回答で複数のステップをまとめて進めないでください。必ず1つのステップだけを実行して、ユーザーの返信を待ってください。
+
     【対応フロー】
     ユーザーの回答に応じて、以下の3つのパターンのいずれかで対応してください。
 
@@ -229,6 +232,12 @@ if user_input := st.chat_input("ここに入力してください..."):
 
       （出力の最後に隠しタグ `[EMAIL_RECEIVED:確認したメールアドレス]` `[INQUIRY_CONTENT:ヒアリングした内容]` をつける）
 
+      ★ステップ4（追記・修正）:
+      もし「ステップ3（最終確認）」を出力した後に、ユーザーがさらに何か発言した場合、
+      それは「問い合わせ内容の追記」とみなしてください。
+      以前の「ご質問内容」に新しい発言を付け加えて、もう一度「ステップ3のテンプレート」を出力してください。
+      （タグの中身も、追記後の全文に更新してください）
+
     パターンC：肯定のみ（はい、大丈夫です）の場合
       ボット：「ありがとうございます。いつ頃のご入金予定になりますでしょうか？」
     """
@@ -252,18 +261,14 @@ if user_input := st.chat_input("ここに入力してください..."):
         # 画面表示用にタグを除去
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
-        # ★追加：表示崩れを防ぐため、Python側で強制的に改行を挿入して整形する
-        # 「＝＝＝」の前後に改行を入れる
+        # ★表示崩れ防止：強制改行挿入ロジック
         display_msg = re.sub(r"(＝＝＝＝＝＝＝＝＝＝)", r"\n\n\1\n\n", display_msg)
-        # 「メールアドレス：」等の前に改行を入れる
         display_msg = re.sub(r"(メールアドレス：)", r"\n\n\1", display_msg)
         display_msg = re.sub(r"(ご質問内容：)", r"\n\n\1", display_msg)
         display_msg = re.sub(r"(ご入金予定日：)", r"\n\n\1", display_msg)
-        # 「上記内容を」や「なお、」の前に改行を入れる
         display_msg = re.sub(r"(上記内容を担当へ)", r"\n\n\1", display_msg)
         display_msg = re.sub(r"(なお、お電話)", r"\n\n\1", display_msg)
         display_msg = re.sub(r"(内容に変更があれば)", r"\n\n\1", display_msg)
-        # 連続しすぎた改行(3つ以上)を2つに整える
         display_msg = re.sub(r'\n{3,}', '\n\n', display_msg).strip()
 
         with st.chat_message("assistant"):
@@ -280,6 +285,7 @@ if user_input := st.chat_input("ここに入力してください..."):
             match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
             if match_content:
                 inquiry_text = match_content.group(1).strip()
+                # 追記された場合もここで上書きされるのでOK
                 sheet.update_cell(row_index, 9, inquiry_text)
 
         # 2. メールアドレス（G列転記 & ステータス更新 & 回答日更新）
