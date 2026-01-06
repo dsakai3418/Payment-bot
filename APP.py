@@ -4,6 +4,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import re
+import datetime
 
 # ==========================================
 # 1. 設定・認証エリア
@@ -114,12 +115,11 @@ except:
 
 # --- チャットのUI表示 ---
 if "messages" not in st.session_state:
-    # ★修正点：改行コード \n を2つ重ねることで、確実に空白行を作ります
     welcome_msg = (
-        f"{company_name} 様\n\n"
-        "いつもご利用ありがとうございます。\n\n"
+        f"{company_name} さま\n\n"
+        "いつもご利用ありがとうございます。  \n"
         "Camelのご請求に関する、未入金金額の確認窓口でございます。\n\n"
-        f"現在、ご請求金額のうち、{unpaid_amount}円のご入金が確認できかねております。\n\n"
+        f"現在、ご請求金額のうち、{unpaid_amount}円のご入金が確認できかねております。  \n"
         "つきましては、ご入金予定日をお伺いしてもよろしいでしょうか？"
     )
     st.session_state.messages = [{"role": "assistant", "content": welcome_msg}]
@@ -137,11 +137,18 @@ if user_input := st.chat_input("ここに入力してください..."):
 
     valid_model_name = get_valid_model_name()
     
-    # ★システムプロンプト：パターンA（入金約束）のテンプレートを変更
+    today_str = datetime.date.today().strftime("%Y年%m月%d日")
+    weekday_str = ["月","火","水","木","金","土","日"][datetime.date.today().weekday()]
+
+    # ★システムプロンプト：H列転記用のタグ [PAYMENT_DATE:...] を出力するように指示追加
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
     
+    【日付情報の基準】
+    本日は {today_str} ({weekday_str}曜日) です。
+    「来週の月曜」「今週末」などの日付表現は、この基準日をもとに具体的な日付（YYYY年M月D日）に変換してください。
+
     【重要：表示フォーマットについて】
     Web画面で正しく改行表示させるため、改行する箇所には必ず「空白行（2回改行）」を入れてください。
     また、指定されたセリフ以外（不要な「。」や挨拶）を勝手に追加しないでください。
@@ -157,7 +164,7 @@ if user_input := st.chat_input("ここに入力してください..."):
 
       ＝＝＝＝＝＝＝＝＝＝
 
-      ご入金予定日：[聞き取った日付]
+      ご入金予定日：[YYYY年M月D日]
 
       ＝＝＝＝＝＝＝＝＝＝
 
@@ -166,7 +173,7 @@ if user_input := st.chat_input("ここに入力してください..."):
       内容に変更があれば再度ご入力ください。
       なければ、そのまま画面を閉じて終了してください。」
 
-      （出力の最後に `[PROMISE_FIXED]` をつける）
+      （出力の最後に `[PROMISE_FIXED]` および `[PAYMENT_DATE:YYYY年M月D日]` をつける）
 
     パターンB：確認したいことがある / 質問がある / わからない / 担当と話したい場合
       
@@ -237,7 +244,6 @@ if user_input := st.chat_input("ここに入力してください..."):
             match_content = re.search(r"\[INQUIRY_CONTENT:(.*?)\]", ai_msg, re.DOTALL)
             if match_content:
                 inquiry_text = match_content.group(1).strip()
-                # I列(9列目)に書き込み
                 sheet.update_cell(row_index, 9, inquiry_text)
 
         # 2. メールアドレス（G列転記 & ステータス更新）
@@ -245,14 +251,18 @@ if user_input := st.chat_input("ここに入力してください..."):
             match_email = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match_email:
                 confirmed_email = match_email.group(1).strip()
-                # G列(7列目)に書き込み
-                sheet.update_cell(row_index, 7, confirmed_email)
-                
-                # F列(6列目)をステータス更新
-                sheet.update_cell(row_index, 6, "メール対応中")
+                sheet.update_cell(row_index, 7, confirmed_email) # G列
+                sheet.update_cell(row_index, 6, "メール対応中") # F列
 
-        # 3. 入金約束（ステータス更新）
-        elif "[PROMISE_FIXED]" in ai_msg:
+        # 3. 入金約束（日付をH列転記 & ステータス更新）
+        if "[PAYMENT_DATE:" in ai_msg:
+            match_date = re.search(r"\[PAYMENT_DATE:(.*?)\]", ai_msg)
+            if match_date:
+                payment_date = match_date.group(1).strip()
+                sheet.update_cell(row_index, 8, payment_date) # H列に日付書き込み
+
+        # 日付タグがなくても PROMISE_FIXED があればステータス更新
+        if "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
     except Exception as e:
