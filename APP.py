@@ -1,7 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
 import gspread
-from google.oauth2.service_account import Credentials # ここで直接認証を作る
+from google.oauth2.service_account import Credentials
+import json
 import re
 
 # ==========================================
@@ -12,23 +13,16 @@ try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     SPREADSHEET_KEY = st.secrets["SPREADSHEET_KEY"]
     
-    # Secretsからデータを取得し、完全に新しい「ただの辞書」としてコピーを作成
-    # これによりStreamlit特有のデータ型によるエラーを排除
-    raw_secret = st.secrets["gcp_service_account"]
+    # ★ここが変更点
+    # Secretsに保存した「長い文字列（JSONそのもの）」を読み込みます
+    # これなら構造が崩れる心配がありません
+    json_str = st.secrets["GCP_JSON_KEY"]
     
-    # データを1つずつ取り出して新しい辞書に入れる（念には念を入れたコピー）
-    service_account_info = {}
-    for key, value in raw_secret.items():
-        service_account_info[key] = value
-
-    # 秘密鍵の改行コード修正
-    # JSONの "\n" という文字を、本物の改行コードに置換
-    if "private_key" in service_account_info:
-        private_key = service_account_info["private_key"]
-        service_account_info["private_key"] = private_key.replace("\\n", "\n")
+    # 文字列を辞書データに変換
+    service_account_info = json.loads(json_str)
 
 except Exception as e:
-    st.error(f"Secretsの読み込み段階でエラーが発生しました: {e}")
+    st.error(f"Secretsの読み込みエラー: {e}")
     st.stop()
 
 # Geminiの設定
@@ -43,12 +37,8 @@ SCOPES = [
 
 def get_database():
     try:
-        # ★ここが最終解決策
-        # ファイルを読み込むのではなく、辞書データから直接「認証オブジェクト(creds)」を作ります
-        # これにより "Cannot convert str..." エラーが出る場所（json.load）を通りません
+        # 辞書データから直接認証を作成
         creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
-        
-        # 作成した認証オブジェクトをgspreadに渡す
         client_gs = gspread.authorize(creds)
         
         # シートを開く
@@ -56,8 +46,7 @@ def get_database():
         return sheet
 
     except Exception as e:
-        # 万が一ここでエラーが出た場合、原因を特定しやすくする
-        st.error(f"認証作成またはシート接続エラー: {e}")
+        st.error(f"接続エラー: {e}")
         raise e
 
 # ==========================================
@@ -84,14 +73,12 @@ try:
     
     # ユーザー検索
     for i, item in enumerate(records):
-        # IDを文字列として比較
         if str(item.get("Camel企業id")) == str(user_id_str):
             customer = item
             row_index = i + 2
             break
         
 except Exception as e:
-    # 詳細エラーは get_database 内で表示済みのため停止のみ
     st.stop()
 
 if not customer:
@@ -105,7 +92,6 @@ company_name = customer.get('会社名', 'お客様')
 # 未入金額の整形
 raw_amount = customer.get('未入金額', 0)
 try:
-    # どんな形式（文字列カンマあり、数値など）でも数値にしてから整形
     amount_val = int(str(raw_amount).replace(",", ""))
     unpaid_amount = "{:,}".format(amount_val)
 except:
