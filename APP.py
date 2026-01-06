@@ -27,31 +27,24 @@ def connect_to_google_sheet():
         genai.configure(api_key=gemini_key)
 
         # --- JSONキーの読み込み ---
-        # Secretsの GPC_JSON_KEY (長い文字列) を読み込みます
         json_str = st.secrets.get("GCP_JSON_KEY")
-        
         if not json_str:
             st.error("エラー: Secretsに 'GCP_JSON_KEY' が見つかりません。")
             st.stop()
 
         try:
-            # 文字列を辞書データ(JSON)に変換
             creds_dict = json.loads(json_str.strip())
         except json.JSONDecodeError as e:
             st.error(f"SecretsのJSON形式が正しくありません。\n詳細: {e}")
             st.stop()
 
-        # --- 秘密鍵の改行コード修正 ---
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-        # --- 認証と接続 (oauth2client使用) ---
+        # --- 認証と接続 ---
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
-        # シートを開く
         sheet = client.open_by_key(sheet_key).sheet1
         return sheet
 
@@ -81,10 +74,9 @@ row_index = -1
 try:
     records = sheet.get_all_records()
     for i, item in enumerate(records):
-        # IDを文字列にして比較
         if str(item.get("Camel企業id")) == str(user_id_str):
             customer = item
-            row_index = i + 2 # ヘッダー行(1) + index(0始まり) の補正
+            row_index = i + 2
             break
 except Exception as e:
     st.error(f"データ取得中にエラーが発生しました: {e}")
@@ -98,7 +90,6 @@ if not customer:
 existing_email_addr = customer.get('送付先メアド', '登録なし')
 company_name = customer.get('会社名', 'お客様')
 
-# 未入金額の整形
 raw_amount = customer.get('未入金額', 0)
 try:
     amount_val = int(str(raw_amount).replace(",", ""))
@@ -108,7 +99,6 @@ except:
 
 # --- チャットのUI表示 ---
 if "messages" not in st.session_state:
-    # ★ご指定の自然な文章に変更済み
     welcome_msg = (
         f"{company_name} 様\n\n"
         "いつもご利用ありがとうございます。\n"
@@ -118,7 +108,6 @@ if "messages" not in st.session_state:
     )
     st.session_state.messages = [{"role": "assistant", "content": welcome_msg}]
 
-# チャット履歴の描画
 for msg in st.session_state.messages:
     role_display = "user" if msg["role"] == "user" else "assistant"
     with st.chat_message(role_display):
@@ -126,38 +115,50 @@ for msg in st.session_state.messages:
 
 # --- ユーザー入力とAI応答 ---
 if user_input := st.chat_input("ここに入力してください..."):
-    # ユーザーの入力を表示
     with st.chat_message("user"):
         st.write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # Geminiの設定
-    model_name = "gemini-1.5-flash"
+    # ★モデル設定：エラー回避のためバージョン指定を変更
+    # もしこれでエラーが出る場合は "gemini-pro" に変えてみてください
+    model_name = "gemini-1.5-flash-latest"
     
-    # ★システムプロンプト：入金確認フローに合わせて調整済み
+    # ★システムプロンプト：ご希望のフローに合わせて刷新
     system_instruction = f"""
     あなたは債権回収窓口の自動ボットです。相手は {company_name} 様です。
     相手の現在の登録メールアドレスは「{existing_email_addr}」です。
     
     【基本ルール】
     親切かつ丁寧なビジネス口調で対応してください。
-    あなたは既に最初の挨拶で「入金予定日を教えてほしい」と質問しています。
-    
-    【対応フロー】
-    1. ユーザーが「具体的な日付」や「いついつ」と答えた場合:
-       「承知いたしました。〇月〇日ですね、ありがとうございます。」と確認し、
-       社内共有のため、出力の最後に必ず `[PROMISE_FIXED]` をつけてください。
-    
-    2. ユーザーが「はい」「大丈夫です」などの肯定のみ答えた場合:
-       「ありがとうございます。いつ頃のご予定になりますでしょうか？」と日付を聞き返してください。
+    あなたは最初の挨拶で「入金予定日」を質問済みです。
 
-    3. ユーザーが「わからない」「メールで連絡したい」「担当者と話したい」と言った場合:
-       「それでは、メールにて詳細を確認させていただいてもよろしいでしょうか？」と提案してください。
-       相手が合意したら `[EMAIL_RECEIVED:{existing_email_addr}]` を出力してください。
-       （もしアドレス変更の申し出があれば `[EMAIL_RECEIVED:新アドレス]` を出力）
+    【対応フロー】
+    ユーザーの回答に応じて、以下の3つのパターンのいずれかで対応してください。
+
+    パターンA：入金予定日を回答してくれた場合
+      ユーザー：「来週の月曜」「10/25です」など
+      ボット：「承知いたしました。〇月〇日ですね、ありがとうございます。」と確認し、
+             出力の最後に `[PROMISE_FIXED]` をつけて終了。
+
+    パターンB：確認したいことがある / 質問がある / わからない / 担当と話したい場合
+      ユーザー：「確認したいことがある」「請求書がない」「内訳を知りたい」など
+      
+      ステップ1: まず「どのような内容をご確認されたいでしょうか？詳細をご入力ください。」と質問内容を聞き出してください。
+      
+      ステップ2（ユーザーが詳細を入力した後）:
+        「承知いたしました。ご質問内容は担当者に申し送りいたします。
+         回答は担当よりメールにてご連絡させていただきますが、
+         現在のメールアドレス（{existing_email_addr}）への送付でよろしいでしょうか？」と確認してください。
+      
+      ステップ3（アドレス確認後）:
+        「承知いたしました。担当へ伝達のうえ、3営業日以内にご連絡いたします。」と答え、
+        出力の最後に `[EMAIL_RECEIVED:{existing_email_addr}]` （または新アドレス）をつけて終了。
+
+    パターンC：肯定のみ（はい、大丈夫です）の場合
+      ユーザー：「はい」「わかった」
+      ボット：「ありがとうございます。いつ頃のご入金予定になりますでしょうか？」と再度日付を聞いてください。
     """
 
-    # Gemini用に履歴を変換
     gemini_history = []
     for m in st.session_state.messages:
         role = "user" if m["role"] == "user" else "model"
@@ -169,35 +170,30 @@ if user_input := st.chat_input("ここに入力してください..."):
             system_instruction=system_instruction
         )
         
-        # 履歴を使ってチャット開始
         chat = model.start_chat(history=gemini_history[:-1])
         response = chat.send_message(user_input)
         
         ai_msg = response.text
-        
-        # 画面表示用にタグを除去
         display_msg = re.sub(r"\[.*?\]", "", ai_msg).strip()
         
         with st.chat_message("assistant"):
             st.write(display_msg)
         st.session_state.messages.append({"role": "assistant", "content": display_msg})
 
-        # --- スプレッドシート更新処理 ---
-        # [EMAIL_RECEIVED:xxx] が含まれていたらメールアドレス更新＆ステータス更新
+        # --- スプレッドシート更新 ---
         if "[EMAIL_RECEIVED:" in ai_msg:
             match = re.search(r"\[EMAIL_RECEIVED:(.*?)\]", ai_msg)
             if match:
                 confirmed_email = match.group(1).strip()
-                # 既存アドレスと違う場合のみG列(7列目)を更新
                 if confirmed_email != str(existing_email_addr).strip():
-                    sheet.update_cell(row_index, 7, confirmed_email) 
-                
-                # F列(6列目)をステータス更新
-                sheet.update_cell(row_index, 6, "メール対応中")
+                    sheet.update_cell(row_index, 7, confirmed_email) # G列
+                sheet.update_cell(row_index, 6, "メール対応中") # F列
 
-        # [PROMISE_FIXED] が含まれていたらステータスを入金約束済に
         elif "[PROMISE_FIXED]" in ai_msg:
             sheet.update_cell(row_index, 6, "入金約束済")
 
     except Exception as e:
+        # エラー時のヒントを表示
         st.error(f"AI応答エラー: {e}")
+        if "404" in str(e):
+            st.warning("ヒント: モデルが見つからないエラーの場合、コード内の `model_name` を 'gemini-pro' に変更して試してみてください。")
